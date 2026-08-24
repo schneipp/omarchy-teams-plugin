@@ -34,7 +34,7 @@ Panel {
   readonly property int calendarDays: setting("calendarDays", 1)
 
   readonly property var state: service ? service.barState
-    : ({ glyph: "󰲜", label: "Teams service not loaded", tone: "off", show: true, pulse: false })
+    : ({ glyph: "󰊻", label: "Teams service not loaded", tone: "off", show: true, pulse: false })
 
   readonly property bool inCall: service ? service.inCall : false
   readonly property bool sharing: service ? service.screenSharing : false
@@ -187,7 +187,7 @@ Panel {
             visible: root.inCall
 
             PanelActionButton {
-              iconText: root.service && root.service.microphone === "muted" ? "󰖏" : "󰖌"
+              iconText: root.service && root.service.microphone === "muted" ? "󰍭" : "󰍬"
               tooltipText: "Toggle mute  (m)"
               foreground: root.service && root.service.microphone === "muted"
                 ? root.urgent : root.foreground
@@ -212,7 +212,7 @@ Panel {
               onClicked: root.act("raiseHand")
             }
             PanelActionButton {
-              iconText: "󰈍"
+              iconText: "󰍹"
               tooltipText: root.sharing ? "You are sharing your screen" : "Not sharing"
               foreground: root.sharing ? root.urgent : Qt.darker(root.foreground, 1.8)
               fontFamily: root.fontFamily

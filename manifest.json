@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "rams.teams",
   "name": "Teams",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "rams",
   "license": "MIT",
   "homepage": "https://github.com/schneipp/omarchy-teams-plugin",
@@ -47,7 +47,7 @@
         "type": "boolean",
         "label": "Show the status text next to the icon",
         "defaultValue": false,
-        "description": "Adds \"Available\", \"In a call · Muted\" and so on beside the glyph. Ignored on a vertical bar."
+        "description": "Adds \"Available\", \"In a call \u00b7 Muted\" and so on beside the glyph. Ignored on a vertical bar."
       },
       {
         "key": "rightClick",
@@ -75,9 +75,18 @@
   },
   "omarchy": {
     "clonePaths": [
-      { "source": "Model.js", "target": "Model.js" },
-      { "source": "bin/omarchy-teams-bridge", "target": "bin/omarchy-teams-bridge" },
-      { "source": "bin/omarchy-teams", "target": "bin/omarchy-teams" }
+      {
+        "source": "Model.js",
+        "target": "Model.js"
+      },
+      {
+        "source": "bin/omarchy-teams-bridge",
+        "target": "bin/omarchy-teams-bridge"
+      },
+      {
+        "source": "bin/omarchy-teams",
+        "target": "bin/omarchy-teams"
+      }
     ]
   }
 }

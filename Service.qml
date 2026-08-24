@@ -29,6 +29,7 @@ Item {
   // because the directory is named after the manifest id, which the user is
   // free to change.
   readonly property string bridgePath: String(Qt.resolvedUrl("bin/omarchy-teams-bridge")).replace(/^file:\/\//, "")
+  readonly property string cliPath: String(Qt.resolvedUrl("bin/omarchy-teams")).replace(/^file:\/\//, "")
 
   // ------------------------------------------------------------------ config
 
@@ -39,7 +40,10 @@ Item {
     theme: { sync: true, fontFamily: "", hideAvatars: false },
     manageTeamsConfig: true,
     windowClass: "teams-for-linux",
-    launchCommand: "uwsm-app -- teams-for-linux"
+    // Empty means "use the plugin CLI", which resolves the real binary (the
+    // AUR package installs to /opt with nothing on PATH) and carries the
+    // Wayland/X11 launch flags from the managed desktop entry.
+    launchCommand: ""
   })
 
   property var config: defaultConfig
@@ -156,7 +160,13 @@ Item {
     id: bridgeRestart
     interval: 3000
     repeat: false
-    onTriggered: service.startBridge()
+    // Guarded: startBridge() kills the old process, whose exited signal lands
+    // AFTER the replacement is already running and schedules this timer. An
+    // unguarded restart here would then kill the healthy new bridge, whose
+    // death schedules the next restart — a permanent 3-second kill loop that
+    // drops teams-for-linux's connection (and flickers the bar icon) on every
+    // lap. Only a bridge that is actually gone gets restarted.
+    onTriggered: if (!bridge.running) service.startBridge()
   }
 
   Timer {
@@ -380,6 +390,10 @@ Item {
       if (cfg("notifications", "callEnded", false)) {
         notify("Call ended", "", "󰋕", "low")
       }
+      if (pendingThemeReload) {
+        pendingThemeReload = false
+        if (cfg("theme", "autoReload", true)) reloadTeams()
+      }
     }
   }
 
@@ -439,9 +453,14 @@ Item {
 
   // ----------------------------------------------------------- launch/focus
 
+  function launchCommand() {
+    var custom = String(cfgTop("launchCommand", ""))
+    return custom || (JSON.stringify(cliPath) + " launch")
+  }
+
   function focusCommand() {
     return "omarchy-launch-or-focus " + JSON.stringify(String(cfgTop("windowClass", "teams-for-linux")))
-      + " " + JSON.stringify(String(cfgTop("launchCommand", "uwsm-app -- teams-for-linux")))
+      + " " + JSON.stringify(launchCommand())
   }
 
   function focusTeams() {
@@ -482,12 +501,21 @@ Item {
 
   onThemeCssChanged: if (cfg("theme", "sync", true)) themeWriteDebounce.restart()
 
+  // A theme switch mid-call must not kill the meeting; remember and apply on
+  // hang-up instead.
+  property bool pendingThemeReload: false
+
   Timer {
     id: themeWriteDebounce
     interval: 400
     repeat: false
-    onTriggered: service.writeThemeCss()
+    onTriggered: service.applyTheme()
   }
+
+  // Auto-restarting Teams is only safe once we have actually read what is on
+  // disk: before the FileView loads, text() is empty, every comparison says
+  // "changed", and a shell restart would take Teams down with it for no reason.
+  property bool cssSeen: false
 
   FileView {
     id: cssFile
@@ -495,12 +523,38 @@ Item {
     watchChanges: false
     atomicWrites: true
     printErrors: false
+    onLoaded: service.cssSeen = true
+    onLoadFailed: { /* no file yet: write, but never auto-restart over it */ }
   }
 
   function writeThemeCss() {
-    if (!cfg("theme", "sync", true)) return
+    if (!cfg("theme", "sync", true)) return false
+    // Compare against what is on disk: the binding also "changes" once at
+    // startup when it first evaluates, and rewriting (worse, auto-restarting
+    // Teams) on every shell start would be absurd.
+    var current = ""
+    try { current = String(cssFile.text() || "") } catch (e) { current = "" }
+    if (current === themeCss) return false
     ensureDir(tflConfigDir)
     cssFile.setText(themeCss)
+    cssSeen = true
+    return true
+  }
+
+  // Teams reads the CSS once per page load, so writing the file is only half
+  // the job — an already-running Teams keeps the old palette until restarted.
+  function applyTheme() {
+    var seen = cssSeen
+    var changed = writeThemeCss()
+    if (!changed || !seen) return
+    if (!teamsConnected) return          // next start picks it up anyway
+    if (inCall) {
+      // Restarting Teams would hang up the call. Do it after.
+      pendingThemeReload = true
+      notify("Theme staged", "Teams retints when the call ends.", "\u{f02bb}", "low")
+      return
+    }
+    if (cfg("theme", "autoReload", true)) reloadTeams()
   }
 
   function ensureDir(dir) {
@@ -516,7 +570,7 @@ Item {
     // itself before ever reaching Teams.
     run(["bash", "-lc",
          "pkill -x teams-for-linux ; sleep 2 ; "
-         + String(cfgTop("launchCommand", "uwsm-app -- teams-for-linux")) + " >/dev/null 2>&1 &"])
+         + launchCommand() + " >/dev/null 2>&1 &"])
   }
 
   // ------------------------------------------------- teams-for-linux config

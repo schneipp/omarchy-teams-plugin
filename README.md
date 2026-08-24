@@ -141,7 +141,7 @@ Everything is also on the shell IPC: `omarchy-shell teams <method>`.
   "broker":        { "host": "127.0.0.1", "port": 1883, "prefix": "teams", "commandTopic": "command" },
   "meetingMode":   { "enabled": true, "stayAwake": true, "doNotDisturb": true },
   "notifications": { "incomingCall": true, "meetingStarting": true, "callEnded": false },
-  "theme":         { "sync": true, "fontFamily": "", "hideAvatars": false },
+  "theme":         { "sync": true, "autoReload": true, "fontFamily": "", "hideAvatars": false },
   "manageTeamsConfig": true
 }
 ```
@@ -161,8 +161,10 @@ your Omarchy palette, so surfaces, text, strokes, and brand accents retint.
 Anything Teams hardcodes outside the token system stays as Microsoft shipped it —
 this is a good retint, not a full reskin.
 
-CSS is read when a page loads, so a theme switch lands on the next Teams start.
-The popup's palette button rewrites and restarts it if you want it now.
+CSS is read when a page loads, so applying it means restarting Teams. With
+`theme.autoReload` on (the default), a theme switch restarts Teams by itself —
+unless you are in a call, in which case it waits and retints on hang-up. The
+popup's palette button forces it immediately.
 
 ## Requirements
 

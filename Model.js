@@ -8,21 +8,23 @@
 // ---------------------------------------------------------------- constants
 
 // Presence values as teams-for-linux publishes them (mqtt/index.js statusMap).
+var TEAMS_GLYPH = "󰊻"
+
 var PRESENCE = {
-  available:      { label: "Available",     glyph: "󰄺", tone: "ok" },
-  busy:           { label: "Busy",          glyph: "󰄺", tone: "busy" },
-  do_not_disturb: { label: "Do not disturb", glyph: "󰔝", tone: "busy" },
-  away:           { label: "Away",          glyph: "󰙄", tone: "idle" },
-  be_right_back:  { label: "Be right back", glyph: "󰙄", tone: "idle" },
-  offline:        { label: "Offline",       glyph: "󰄺", tone: "off" },
-  unknown:        { label: "Unknown",       glyph: "󰄺", tone: "off" }
+  available:      { label: "Available",     glyph: TEAMS_GLYPH, tone: "ok" },
+  busy:           { label: "Busy",          glyph: TEAMS_GLYPH, tone: "busy" },
+  do_not_disturb: { label: "Do not disturb", glyph: TEAMS_GLYPH, tone: "busy" },
+  away:           { label: "Away",          glyph: TEAMS_GLYPH, tone: "idle" },
+  be_right_back:  { label: "Be right back", glyph: TEAMS_GLYPH, tone: "idle" },
+  offline:        { label: "Offline",       glyph: TEAMS_GLYPH, tone: "off" },
+  unknown:        { label: "Unknown",       glyph: TEAMS_GLYPH, tone: "off" }
 }
 
 var MIC = {
-  speaking: { label: "Speaking",  glyph: "󰖌", tone: "ok" },
-  silent:   { label: "Unmuted",   glyph: "󰖌", tone: "normal" },
-  muted:    { label: "Muted",     glyph: "󰖏", tone: "busy" },
-  off:      { label: "Mic off",   glyph: "󰖏", tone: "off" }
+  speaking: { label: "Speaking",  glyph: "󰍬", tone: "ok" },
+  silent:   { label: "Unmuted",   glyph: "󰍬", tone: "normal" },
+  muted:    { label: "Muted",     glyph: "󰍭", tone: "busy" },
+  off:      { label: "Mic off",   glyph: "󰍭", tone: "off" }
 }
 
 // Actions teams-for-linux accepts on the command topic. Anything not in this
@@ -92,13 +94,13 @@ function subtopic(topic, prefix) {
 // this stays testable. Order matters: the most urgent thing wins the icon.
 
 function barState(s) {
-  if (!s.bridgeReady) return { glyph: "󰲜", label: "Teams bridge starting", tone: "off", show: false }
-  if (!s.teamsConnected) return { glyph: "󰲜", label: "Teams not running", tone: "off", show: !!s.showWhenClosed }
+  if (!s.bridgeReady) return { glyph: TEAMS_GLYPH, label: "Teams bridge starting", tone: "off", show: false }
+  if (!s.teamsConnected) return { glyph: TEAMS_GLYPH, label: "Teams not running", tone: "off", show: !!s.showWhenClosed }
 
   if (s.incomingCall)
     return { glyph: "󰕿", label: "Incoming call", tone: "urgent", show: true, pulse: true }
   if (s.screenSharing)
-    return { glyph: "󰈍", label: "Sharing your screen", tone: "urgent", show: true, pulse: true }
+    return { glyph: "󰍹", label: "Sharing your screen", tone: "urgent", show: true, pulse: true }
   if (s.inCall) {
     var mic = micInfo(s.microphone)
     return {

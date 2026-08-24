@@ -62,13 +62,27 @@ cmd_link() {
   # If a window is already up, hand the URL to the running instance and raise
   # it, rather than letting a second process fight over the single-instance
   # lock and leave the meeting opening behind another window.
+  local flags
+  flags=$(current_flags)
   if command -v hyprctl >/dev/null 2>&1 &&
      hyprctl clients -j 2>/dev/null | grep -q "\"class\": \"$APP_ID\""; then
+    # Hand the URL to the running instance (single-instance lock routes it),
+    # then raise the window.
     setsid "$(teams_exec)" "$target" >/dev/null 2>&1 &
-    omarchy-launch-or-focus "$APP_ID" "$(teams_exec)" >/dev/null 2>&1 || true
+    omarchy-launch-or-focus "$APP_ID" "true" >/dev/null 2>&1 || true
   else
-    setsid "$(teams_exec)" "$target" >/dev/null 2>&1 &
+    setsid uwsm-app -- "$(teams_exec)" $flags "$target" >/dev/null 2>&1 &
   fi
+}
+
+cmd_launch() {
+  # The AUR package installs to /opt with nothing on PATH, and the launch flags
+  # (Wayland vs X11) live in the desktop entry this CLI manages. This is the
+  # one place that knows both, which is why the shell plugin launches Teams
+  # through here instead of guessing.
+  local flags
+  flags=$(current_flags)
+  exec setsid uwsm-app -- "$(teams_exec)" $flags "$@"
 }
 
 # ---------------------------------------------------------------- desktop entry
@@ -270,6 +284,7 @@ omarchy-teams — Microsoft Teams, wired into Omarchy
   theme               Rewrite the theme CSS from the current Omarchy theme
   theme --reload      ...and restart Teams so it takes effect now
   link <url>          Open an msteams:// or teams.microsoft.com/l/ link
+  launch              Start Teams with the configured launch flags
   install [on|off]    Install desktop entries and claim msteams:// links
   wayland <on|off>    Native Wayland (better screen share) or XWayland
   config              Edit the plugin config
@@ -288,6 +303,7 @@ case "${1:-}" in
   bridge)   shift; ipc restartBridge ;;
   unstick)  shift; ipc endMeetingMode ;;
   link)     shift; cmd_link "${1:-}" ;;
+  launch)   shift; cmd_launch "$@" ;;
   install)  shift; cmd_install "${1:-keep}" ;;
   wayland)  shift; cmd_wayland "${1:-status}" ;;
   config)   shift; cmd_config ;;
