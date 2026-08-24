@@ -568,8 +568,13 @@ Item {
     // matters: this runs inside a `bash -c` whose own command line contains the
     // pattern, so a `pkill -f` here would match the shell running it and kill
     // itself before ever reaching Teams.
+    // Waiting for the process to actually die matters: Electron can take
+    // longer than a fixed sleep to shut down, and a relaunch that races the
+    // old instance loses to its single-instance lock and simply exits —
+    // which reads as "Teams crashed and never came back".
     run(["bash", "-lc",
-         "pkill -x teams-for-linux ; sleep 2 ; "
+         "pkill -x teams-for-linux ; "
+         + "for i in $(seq 1 20); do pgrep -x teams-for-linux >/dev/null || break ; sleep 0.5 ; done ; "
          + launchCommand() + " >/dev/null 2>&1 &"])
   }
 
