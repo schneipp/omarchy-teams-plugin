@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+"""omarchy-teams-bridge — the MQTT wire for the rams.teams Omarchy shell plugin.
+
+Quickshell cannot open TCP sockets and teams-for-linux only speaks MQTT, so this
+process is the transport between them. It is deliberately dumb: no policy, no
+state machine, no side effects. Everything that decides what a signal *means*
+lives in the QML service.
+
+Two modes, picked automatically:
+
+  broker  We own 127.0.0.1:<port> and run a loopback-only MQTT 3.1.1 broker that
+          teams-for-linux connects to. No mosquitto, no root, no system unit.
+  client  Something already holds that port (a real mosquitto, usually), so we
+          connect to it as an ordinary MQTT client instead and relay the same
+          way. The plugin cannot tell the difference.
+
+Line protocol on stdout (newline-delimited JSON, one object per line):
+
+  {"t":"ready","mode":"broker","port":1883}
+  {"t":"link","up":true,"client":"teams-for-linux"}   client attached/detached
+  {"t":"msg","topic":"teams/in-call","payload":"true","retain":true}
+  {"t":"error","message":"..."}
+
+Line protocol on stdin:
+
+  {"cmd":"publish","topic":"teams/command","payload":"{\"action\":\"toggle-mute\"}"}
+  {"cmd":"ping"}
+
+Retained messages are replayed to every new subscriber, which is what lets the
+bar show the right state immediately after a shell restart rather than waiting
+for the next thing to change.
+"""
+
+import argparse
+import asyncio
+import errno
+import json
+import os
+import sys
+
+# --- MQTT 3.1.1 control packet types ------------------------------------------
+
+CONNECT, CONNACK, PUBLISH, PUBACK = 1, 2, 3, 4
+PUBREC, PUBREL, PUBCOMP, SUBSCRIBE = 5, 6, 7, 8
+SUBACK, UNSUBSCRIBE, UNSUBACK = 9, 10, 11
+PINGREQ, PINGRESP, DISCONNECT = 12, 13, 14
+
+
+def encode_remaining_length(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte = n % 128
+        n //= 128
+        if n > 0:
+            byte |= 0x80
+        out.append(byte)
+        if n == 0:
+            return bytes(out)
+
+
+async def read_remaining_length(reader: asyncio.StreamReader) -> int:
+    multiplier, value = 1, 0
+    for _ in range(4):
+        (byte,) = await reader.readexactly(1)
+        value += (byte & 0x7F) * multiplier
+        if not byte & 0x80:
+            return value
+        multiplier *= 128
+    raise ValueError("malformed remaining length")
+
+
+def encode_string(s: str) -> bytes:
+    raw = s.encode("utf-8")
+    return len(raw).to_bytes(2, "big") + raw
+
+
+def take_string(buf: bytes, pos: int):
+    length = int.from_bytes(buf[pos:pos + 2], "big")
+    start = pos + 2
+    return buf[start:start + length].decode("utf-8", "replace"), start + length
+
+
+def packet(ptype: int, flags: int, body: bytes) -> bytes:
+    return bytes([(ptype << 4) | flags]) + encode_remaining_length(len(body)) + body
+
+
+def topic_matches(filt: str, topic: str) -> bool:
+    """MQTT topic filter matching, including + and # wildcards."""
+    if filt == "#":
+        return not topic.startswith("$")
+    f, t = filt.split("/"), topic.split("/")
+    i = 0
+    while i < len(f):
+        if f[i] == "#":
+            return i == len(f) - 1 and len(t) >= i
+        if i >= len(t):
+            return False
+        if f[i] != "+" and f[i] != t[i]:
+            return False
+        i += 1
+    return i == len(t)
+
+
+def emit(obj) -> None:
+    """One JSON object per line on stdout. The QML service reads these."""
+    try:
+        sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+    except (BrokenPipeError, ValueError):
+        # The shell went away; nothing left to talk to.
+        os._exit(0)
+
+
+# --- broker mode ---------------------------------------------------------------
+
+
+class Session:
+    def __init__(self, writer: asyncio.StreamWriter):
+        self.writer = writer
+        self.client_id = ""
+        self.subscriptions: list[str] = []
+        self.will = None  # (topic, payload, retain)
+
+    def send(self, data: bytes) -> None:
+        try:
+            self.writer.write(data)
+        except Exception:
+            pass
+
+
+class Broker:
+    def __init__(self, state_path: str = ""):
+        self.sessions: set[Session] = set()
+        self.retained: dict[str, tuple[bytes, bool]] = {}
+        self.state_path = state_path
+
+    # Retained values normally die with the broker. Ours would take the bar's
+    # idea of the world with them: teams-for-linux only republishes presence
+    # when it *changes*, so a shell restart would leave the widget showing
+    # "unknown" until the user next changed their status. Persisting them for
+    # the life of the session is what a real broker's persistence buys, and it
+    # is why restarting the shell mid-call does not lose the call.
+    def load_state(self) -> None:
+        if not self.state_path or not os.path.exists(self.state_path):
+            return
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as fh:
+                stored = json.load(fh)
+        except (OSError, ValueError):
+            return
+        if not isinstance(stored, dict):
+            return
+        for topic, payload in stored.items():
+            if not isinstance(topic, str) or not isinstance(payload, str):
+                continue
+            self.retained[topic] = (payload.encode("utf-8"), True)
+            emit({"t": "msg", "topic": topic, "payload": payload, "retain": True})
+
+    def save_state(self) -> None:
+        if not self.state_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+            tmp = self.state_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({t: p.decode("utf-8", "replace")
+                           for t, (p, _) in self.retained.items()}, fh)
+            os.replace(tmp, self.state_path)
+        except OSError:
+            pass
+
+    def publish(self, topic: str, payload: bytes, retain: bool, echo: bool = True) -> None:
+        if retain:
+            # An empty retained payload clears the retained value, per spec.
+            if payload:
+                self.retained[topic] = (payload, retain)
+            else:
+                self.retained.pop(topic, None)
+            self.save_state()
+
+        if echo:
+            emit({
+                "t": "msg",
+                "topic": topic,
+                "payload": payload.decode("utf-8", "replace"),
+                "retain": retain,
+            })
+
+        frame = packet(PUBLISH, 0, encode_string(topic) + payload)
+        for session in list(self.sessions):
+            if any(topic_matches(f, topic) for f in session.subscriptions):
+                session.send(frame)
+
+    def replay_retained(self, session: Session, filt: str) -> None:
+        for topic, (payload, _) in list(self.retained.items()):
+            if topic_matches(filt, topic):
+                session.send(packet(PUBLISH, 0x01, encode_string(topic) + payload))
+
+    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        session = Session(writer)
+        self.sessions.add(session)
+        clean_exit = False
+        try:
+            while True:
+                header = await reader.readexactly(1)
+                ptype, flags = header[0] >> 4, header[0] & 0x0F
+                length = await read_remaining_length(reader)
+                body = await reader.readexactly(length) if length else b""
+
+                if ptype == CONNECT:
+                    self._on_connect(session, body)
+                elif ptype == PUBLISH:
+                    self._on_publish(session, flags, body)
+                elif ptype == SUBSCRIBE:
+                    self._on_subscribe(session, body)
+                elif ptype == UNSUBSCRIBE:
+                    self._on_unsubscribe(session, body)
+                elif ptype == PINGREQ:
+                    session.send(packet(PINGRESP, 0, b""))
+                elif ptype == DISCONNECT:
+                    clean_exit = True
+                    break
+                elif ptype == PUBREL:
+                    packet_id = body[0:2]
+                    session.send(packet(PUBCOMP, 0, packet_id))
+                await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionResetError, ValueError):
+            pass
+        except Exception as exc:  # noqa: BLE001 - never take the bridge down
+            emit({"t": "error", "message": f"session: {exc}"})
+        finally:
+            self.sessions.discard(session)
+            # A clean DISCONNECT means the will is discarded; a dropped socket
+            # means it fires. That is the whole point of a last will: the bar
+            # greys out when Teams dies without saying goodbye.
+            if not clean_exit and session.will:
+                topic, payload, retain = session.will
+                self.publish(topic, payload, retain)
+            if session.client_id:
+                emit({"t": "link", "up": False, "client": session.client_id})
+            try:
+                writer.close()
+            except Exception:
+                pass
+
+    def _on_connect(self, session: Session, body: bytes) -> None:
+        _, pos = take_string(body, 0)          # protocol name
+        pos += 1                                # protocol level
+        flags = body[pos]
+        pos += 3                                # flags + keepalive
+        session.client_id, pos = take_string(body, pos)
+
+        if flags & 0x04:  # will flag
+            will_topic, pos = take_string(body, pos)
+            will_len = int.from_bytes(body[pos:pos + 2], "big")
+            pos += 2
+            will_payload = body[pos:pos + will_len]
+            pos += will_len
+            session.will = (will_topic, will_payload, bool(flags & 0x20))
+
+        # Username/password are parsed only to stay in sync with the buffer;
+        # a loopback-only broker has nobody to authenticate.
+        if flags & 0x80:
+            _, pos = take_string(body, pos)
+        if flags & 0x40:
+            _, pos = take_string(body, pos)
+
+        session.send(packet(CONNACK, 0, bytes([0x00, 0x00])))
+        emit({"t": "link", "up": True, "client": session.client_id})
+
+    def _on_publish(self, session: Session, flags: int, body: bytes) -> None:
+        retain = bool(flags & 0x01)
+        qos = (flags >> 1) & 0x03
+        topic, pos = take_string(body, 0)
+        packet_id = None
+        if qos > 0:
+            packet_id = body[pos:pos + 2]
+            pos += 2
+        self.publish(topic, body[pos:], retain)
+        if qos == 1 and packet_id:
+            session.send(packet(PUBACK, 0, packet_id))
+        elif qos == 2 and packet_id:
+            session.send(packet(PUBREC, 0, packet_id))
+
+    def _on_subscribe(self, session: Session, body: bytes) -> None:
+        packet_id = body[0:2]
+        pos, granted = 2, bytearray()
+        while pos < len(body):
+            filt, pos = take_string(body, pos)
+            pos += 1  # requested qos; we always grant 0
+            if filt not in session.subscriptions:
+                session.subscriptions.append(filt)
+            granted.append(0x00)
+        session.send(packet(SUBACK, 0, packet_id + bytes(granted)))
+        for filt in session.subscriptions:
+            self.replay_retained(session, filt)
+
+    def _on_unsubscribe(self, session: Session, body: bytes) -> None:
+        packet_id = body[0:2]
+        pos = 2
+        while pos < len(body):
+            filt, pos = take_string(body, pos)
+            if filt in session.subscriptions:
+                session.subscriptions.remove(filt)
+        session.send(packet(UNSUBACK, 0, packet_id))
+
+
+# --- client mode ---------------------------------------------------------------
+
+
+class Client:
+    """Relay against somebody else's broker, when one already owns the port."""
+
+    def __init__(self, host: str, port: int, prefix: str, client_id: str):
+        self.host, self.port = host, port
+        self.prefix, self.client_id = prefix, client_id
+        self.writer: asyncio.StreamWriter | None = None
+
+    async def run(self) -> None:
+        reader, writer = await asyncio.open_connection(self.host, self.port)
+        self.writer = writer
+
+        payload = (
+            encode_string("MQTT") + bytes([0x04, 0x02]) + (60).to_bytes(2, "big")
+            + encode_string(self.client_id)
+        )
+        writer.write(packet(CONNECT, 0, payload))
+        writer.write(packet(SUBSCRIBE, 0x02, (1).to_bytes(2, "big")
+                            + encode_string(f"{self.prefix}/#") + bytes([0x00])))
+        await writer.drain()
+
+        asyncio.create_task(self._keepalive())
+
+        while True:
+            header = await reader.readexactly(1)
+            ptype, flags = header[0] >> 4, header[0] & 0x0F
+            length = await read_remaining_length(reader)
+            body = await reader.readexactly(length) if length else b""
+
+            if ptype == PUBLISH:
+                topic, pos = take_string(body, 0)
+                if (flags >> 1) & 0x03 > 0:
+                    pos += 2
+                emit({
+                    "t": "msg",
+                    "topic": topic,
+                    "payload": body[pos:].decode("utf-8", "replace"),
+                    "retain": bool(flags & 0x01),
+                })
+
+    async def _keepalive(self) -> None:
+        while self.writer is not None:
+            await asyncio.sleep(30)
+            try:
+                self.writer.write(packet(PINGREQ, 0, b""))
+                await self.writer.drain()
+            except Exception:
+                return
+
+    def publish(self, topic: str, payload: bytes, retain: bool) -> None:
+        if not self.writer:
+            return
+        flags = 0x01 if retain else 0x00
+        self.writer.write(packet(PUBLISH, flags, encode_string(topic) + payload))
+
+
+# --- stdin command loop --------------------------------------------------------
+
+
+async def read_commands(publish) -> None:
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader()
+    await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+
+    while True:
+        line = await reader.readline()
+        if not line:
+            # stdin closed: the shell is gone, so we should go too.
+            os._exit(0)
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if msg.get("cmd") == "publish":
+            topic = str(msg.get("topic") or "")
+            if not topic:
+                continue
+            publish(topic, str(msg.get("payload") or "").encode("utf-8"),
+                    bool(msg.get("retain", False)))
+        elif msg.get("cmd") == "ping":
+            emit({"t": "pong"})
+
+
+async def main_client_mode(args) -> None:
+    """Client mode with the stdin loop attached, retrying the link forever."""
+    client = Client(args.host, args.port, args.prefix, args.client_id)
+    asyncio.create_task(read_commands(client.publish))
+    first = True
+    while True:
+        try:
+            if first:
+                emit({"t": "ready", "mode": "client", "port": args.port})
+                first = False
+            await client.run()
+        except (ConnectionRefusedError, asyncio.IncompleteReadError,
+                ConnectionResetError, OSError) as err:
+            emit({"t": "error", "message": f"broker link lost: {err}"})
+        client.writer = None
+        await asyncio.sleep(3)
+
+
+async def dispatch(args) -> None:
+    broker = Broker(args.state)
+    broker.load_state()
+    try:
+        server = await asyncio.start_server(broker.handle, args.host, args.port)
+    except OSError as exc:
+        if exc.errno not in (errno.EADDRINUSE, errno.EACCES):
+            raise
+        await main_client_mode(args)
+        return
+
+    emit({"t": "ready", "mode": "broker", "port": args.port})
+    asyncio.create_task(read_commands(
+        lambda t, p, r: broker.publish(t, p, r, echo=False)))
+    async with server:
+        await server.serve_forever()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=1883)
+    parser.add_argument("--prefix", default="teams")
+    parser.add_argument("--client-id", default="omarchy-teams-bridge")
+    parser.add_argument(
+        "--state",
+        default="",
+        help="where retained topics are kept across bridge restarts; "
+             "under XDG_RUNTIME_DIR by default so they die with the session")
+    args = parser.parse_args()
+
+    # Namespaced by port so a bridge on a test port can never write over the
+    # store belonging to the one the running shell owns.
+    if not args.state:
+        args.state = os.path.join(
+            os.environ.get("XDG_RUNTIME_DIR") or "/tmp",
+            "omarchy-teams", "retained-%d.json" % args.port)
+
+    try:
+        asyncio.run(dispatch(args))
+    except KeyboardInterrupt:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        emit({"t": "error", "message": str(exc)})
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# omarchy-teams — command line front end for the rams.teams Omarchy plugin.
+#
+# Everything stateful lives in the shell plugin; this is a thin, scriptable way
+# to reach it (and the one piece that has to exist outside the shell: the
+# msteams:// URL handler, which xdg-open invokes as a plain executable).
+
+set -uo pipefail
+
+SELF_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+PLUGIN_DIR=$(dirname "$SELF_DIR")
+APP_ID="teams-for-linux"
+DESKTOP_FILE="$HOME/.local/share/applications/omarchy-teams.desktop"
+TFL_CONFIG="$HOME/.config/teams-for-linux/config.json"
+PLUGIN_CONFIG="$HOME/.config/omarchy/teams.json"
+
+die() { echo "omarchy-teams: $*" >&2; exit 1; }
+
+ipc() {
+  command -v omarchy-shell >/dev/null 2>&1 || die "omarchy-shell not found"
+  omarchy-shell teams "$@"
+}
+
+teams_exec() {
+  # Prefer the packaged binary; fall back to whatever is on PATH.
+  if [[ -x /opt/teams-for-linux/teams-for-linux ]]; then
+    echo "/opt/teams-for-linux/teams-for-linux"
+  else
+    command -v teams-for-linux || echo teams-for-linux
+  fi
+}
+
+# ---------------------------------------------------------------- deep links
+#
+# Teams hands out both forms of the same link. The app only understands the
+# msteams:// form, so normalise toward it and let the app do the routing.
+#
+#   https://teams.microsoft.com/l/meetup-join/...  ->  msteams://teams.microsoft.com/l/meetup-join/...
+#   msteams:/l/meetup-join/...                     ->  msteams://teams.microsoft.com/l/meetup-join/...
+normalize_link() {
+  local url=$1
+  case $url in
+    https://teams.microsoft.com/l/*|http://teams.microsoft.com/l/*)
+      echo "msteams://teams.microsoft.com/l/${url#*teams.microsoft.com/l/}" ;;
+    msteams://teams.microsoft.com/*|msteams://l/*)
+      echo "$url" ;;
+    msteams:/l/*)
+      echo "msteams://teams.microsoft.com/l/${url#msteams:/l/}" ;;
+    msteams://*)
+      echo "$url" ;;
+    *)
+      echo "$url" ;;
+  esac
+}
+
+cmd_link() {
+  local url=${1:-}
+  [[ -n $url ]] || die "usage: omarchy-teams link <url>"
+  local target
+  target=$(normalize_link "$url")
+
+  # If a window is already up, hand the URL to the running instance and raise
+  # it, rather than letting a second process fight over the single-instance
+  # lock and leave the meeting opening behind another window.
+  if command -v hyprctl >/dev/null 2>&1 &&
+     hyprctl clients -j 2>/dev/null | grep -q "\"class\": \"$APP_ID\""; then
+    setsid "$(teams_exec)" "$target" >/dev/null 2>&1 &
+    omarchy-launch-or-focus "$APP_ID" "$(teams_exec)" >/dev/null 2>&1 || true
+  else
+    setsid "$(teams_exec)" "$target" >/dev/null 2>&1 &
+  fi
+}
+
+# ---------------------------------------------------------------- desktop entry
+
+cmd_install() {
+  local wayland=${1:-keep}
+  mkdir -p "$(dirname "$DESKTOP_FILE")"
+
+  local flags=""
+  case $wayland in
+    on)   flags="--ozone-platform=wayland --enable-features=WaylandWindowDecorations,WebRTCPipeWireCapturer" ;;
+    off)  flags="--ozone-platform=x11" ;;
+    keep) flags=$(current_flags) ;;
+  esac
+
+  cat >"$DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Version=1.0
+Name=Teams
+Comment=Microsoft Teams, wired into Omarchy
+Exec=$SELF_DIR/omarchy-teams link %u
+TryExec=$(teams_exec)
+Terminal=false
+Type=Application
+Icon=teams-for-linux
+StartupNotify=true
+StartupWMClass=$APP_ID
+Categories=Chat;Network;Office;
+MimeType=x-scheme-handler/msteams;
+EOF
+
+  # A second entry carries the launch flags, so "open Teams" and "open this
+  # meeting link" do not have to be the same command.
+  cat >"$HOME/.local/share/applications/omarchy-teams-app.desktop" <<EOF
+[Desktop Entry]
+Version=1.0
+Name=Teams for Linux
+Comment=Microsoft Teams
+Exec=$(teams_exec) $flags %U
+Terminal=false
+Type=Application
+Icon=teams-for-linux
+StartupNotify=true
+StartupWMClass=$APP_ID
+Categories=Chat;Network;Office;
+NoDisplay=true
+EOF
+
+  update-desktop-database "$HOME/.local/share/applications" >/dev/null 2>&1 || true
+  xdg-mime default omarchy-teams.desktop x-scheme-handler/msteams >/dev/null 2>&1 || true
+
+  echo "Installed:"
+  echo "  $DESKTOP_FILE"
+  echo "  msteams:// links now open through this plugin"
+  [[ $wayland != keep ]] && echo "  launch flags: $flags"
+  return 0
+}
+
+current_flags() {
+  if [[ -f $HOME/.local/share/applications/omarchy-teams-app.desktop ]]; then
+    sed -n 's/^Exec=[^ ]* \(.*\) %U$/\1/p' \
+      "$HOME/.local/share/applications/omarchy-teams-app.desktop" | head -1
+  else
+    echo "--ozone-platform=x11"
+  fi
+}
+
+cmd_wayland() {
+  local mode=${1:-}
+  case $mode in
+    on|off) cmd_install "$mode" ;;
+    status)
+      local f; f=$(current_flags)
+      if [[ $f == *wayland* ]]; then echo "wayland"; else echo "x11"; fi ;;
+    *) die "usage: omarchy-teams wayland <on|off|status>" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- doctor
+
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$*"; ISSUES=$((ISSUES + 1)); }
+bad()  { printf '  \033[31m✗\033[0m %s\n' "$*"; ISSUES=$((ISSUES + 1)); }
+
+cmd_doctor() {
+  ISSUES=0
+  echo "prerequisites:"
+  command -v python3 >/dev/null && ok "python3 $(python3 --version 2>&1 | cut -d' ' -f2)" \
+    || bad "python3 missing (the bridge needs it)"
+  if [[ -x $(teams_exec) ]] || command -v teams-for-linux >/dev/null; then
+    ok "teams-for-linux installed"
+  else
+    bad "teams-for-linux not installed — yay -S teams-for-linux-bin"
+  fi
+  [[ -x $PLUGIN_DIR/bin/omarchy-teams-bridge ]] && ok "bridge present" \
+    || bad "bridge missing at $PLUGIN_DIR/bin/omarchy-teams-bridge"
+
+  echo "plugin:"
+  if omarchy-plugin-list 2>/dev/null | grep -q "rams.teams"; then
+    ok "rams.teams registered with the shell"
+  else
+    warn "rams.teams not listed — omarchy plugin add / enable it"
+  fi
+  local st
+  st=$(ipc status 2>/dev/null)
+  if [[ -n $st && $st != *"No such"* ]]; then
+    ok "service responding on the shell IPC"
+    if command -v jq >/dev/null 2>&1; then
+      echo "$st" | jq -r '"    bridge: \(.bridge.mode // "?") ready=\(.bridge.ready)  teams=\(.teamsConnected)  presence=\(.presence)"' 2>/dev/null
+      local err; err=$(echo "$st" | jq -r '.error // ""' 2>/dev/null)
+      [[ -n $err && $err != null ]] && warn "service reports: $err"
+    fi
+  else
+    warn "service not answering (is the plugin enabled and the shell running?)"
+  fi
+
+  echo "teams-for-linux config:"
+  if [[ -f $TFL_CONFIG ]]; then
+    if command -v jq >/dev/null 2>&1; then
+      local enabled broker ctopic css
+      enabled=$(jq -r '.mqtt.enabled // false' "$TFL_CONFIG" 2>/dev/null)
+      broker=$(jq -r '.mqtt.brokerUrl // ""' "$TFL_CONFIG" 2>/dev/null)
+      ctopic=$(jq -r '.mqtt.commandTopic // ""' "$TFL_CONFIG" 2>/dev/null)
+      css=$(jq -r '.customCSSLocation // ""' "$TFL_CONFIG" 2>/dev/null)
+      [[ $enabled == true ]] && ok "mqtt enabled" || bad "mqtt disabled in $TFL_CONFIG"
+      [[ -n $broker ]] && ok "broker $broker" || bad "no brokerUrl set"
+      [[ -n $ctopic ]] && ok "command topic '$ctopic' (mute keybind works)" \
+        || warn "no commandTopic — mute/video commands will not reach Teams"
+      if [[ -n $css ]]; then
+        [[ -f $css ]] && ok "theme css $css" || warn "customCSSLocation set but file missing: $css"
+      else
+        warn "no customCSSLocation — Teams will not follow the Omarchy theme"
+      fi
+    else
+      warn "jq not installed; skipping config inspection"
+    fi
+  else
+    warn "$TFL_CONFIG does not exist yet (start Teams once, or let the plugin write it)"
+  fi
+
+  echo "wayland / screen sharing:"
+  # pgrep -x matches the kernel comm name, which is truncated to 15 characters
+  # ("xdg-desktop-por"), so an -x check for the full name never matches. Match
+  # the full command line instead.
+  if pgrep -f "xdg-desktop-portal-hyprland" >/dev/null 2>&1; then
+    ok "xdg-desktop-portal-hyprland running"
+  else
+    warn "xdg-desktop-portal-hyprland not running — screen sharing will fail"
+  fi
+  pgrep -f "/pipewire\b" >/dev/null 2>&1 || pgrep -x pipewire >/dev/null 2>&1 \
+    && ok "pipewire running" || warn "pipewire not running"
+  local plat; plat=$(cmd_wayland status)
+  if [[ $plat == wayland ]]; then
+    ok "launching under native Wayland"
+  else
+    warn "launching under XWayland (omarchy-teams wayland on for native + PipeWire capture)"
+  fi
+
+  echo
+  if (( ISSUES == 0 )); then
+    echo "All good."
+  else
+    echo "$ISSUES thing(s) to look at."
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------- config
+
+cmd_config() {
+  mkdir -p "$(dirname "$PLUGIN_CONFIG")"
+  if [[ ! -f $PLUGIN_CONFIG ]]; then
+    cat >"$PLUGIN_CONFIG" <<'EOF'
+{
+  "broker":       { "host": "127.0.0.1", "port": 1883, "prefix": "teams", "commandTopic": "command" },
+  "meetingMode":  { "enabled": true, "stayAwake": true, "doNotDisturb": true },
+  "notifications":{ "incomingCall": true, "meetingStarting": true, "callEnded": false },
+  "theme":        { "sync": true, "fontFamily": "", "hideAvatars": false },
+  "manageTeamsConfig": true,
+  "windowClass": "teams-for-linux",
+  "launchCommand": "uwsm-app -- teams-for-linux"
+}
+EOF
+    echo "wrote $PLUGIN_CONFIG"
+  fi
+  "${EDITOR:-nvim}" "$PLUGIN_CONFIG"
+}
+
+usage() {
+  cat <<'EOF'
+omarchy-teams — Microsoft Teams, wired into Omarchy
+
+  status              Current state as JSON (from the shell plugin)
+  mute                Toggle mute, from anywhere
+  video               Toggle camera
+  hand                Toggle raised hand
+  focus               Focus Teams, or start it
+  calendar [days]     Ask Teams for upcoming events (needs Graph API enabled)
+  theme               Rewrite the theme CSS from the current Omarchy theme
+  theme --reload      ...and restart Teams so it takes effect now
+  link <url>          Open an msteams:// or teams.microsoft.com/l/ link
+  install [on|off]    Install desktop entries and claim msteams:// links
+  wayland <on|off>    Native Wayland (better screen share) or XWayland
+  config              Edit the plugin config
+  doctor              Check the whole setup
+EOF
+}
+
+case "${1:-}" in
+  status)   shift; ipc status ;;
+  mute)     shift; ipc toggleMute ;;
+  video)    shift; ipc toggleVideo ;;
+  hand)     shift; ipc raiseHand ;;
+  focus)    shift; ipc focus ;;
+  calendar) shift; ipc calendar "${1:-1}" ;;
+  theme)    shift; [[ ${1:-} == --reload ]] && ipc reloadTheme || ipc writeTheme ;;
+  bridge)   shift; ipc restartBridge ;;
+  unstick)  shift; ipc endMeetingMode ;;
+  link)     shift; cmd_link "${1:-}" ;;
+  install)  shift; cmd_install "${1:-keep}" ;;
+  wayland)  shift; cmd_wayland "${1:-status}" ;;
+  config)   shift; cmd_config ;;
+  doctor)   shift; cmd_doctor ;;
+  ""|-h|--help|help) usage ;;
+  *) die "unknown command: $1 (try --help)" ;;
+esac
