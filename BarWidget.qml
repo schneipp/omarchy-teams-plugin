@@ -377,14 +377,6 @@ Panel {
               onClicked: { root.focusTeams(); root.close() }
             }
             PanelActionButton {
-              iconText: "󰸉"
-              tooltipText: "Apply the Omarchy theme to Teams now"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              bordered: true
-              onClicked: if (root.service) root.service.applyThemeNow()
-            }
-            PanelActionButton {
               iconText: "󰑓"
               tooltipText: root.service && root.service.bridgeReady
                 ? "Bridge: " + root.service.bridgeMode + " — restart it"
