@@ -141,7 +141,7 @@ Everything is also on the shell IPC: `omarchy-shell teams <method>`.
   "broker":        { "host": "127.0.0.1", "port": 1883, "prefix": "teams", "commandTopic": "command" },
   "meetingMode":   { "enabled": true, "stayAwake": true, "doNotDisturb": true },
   "notifications": { "incomingCall": true, "meetingStarting": true, "callEnded": false },
-  "theme":         { "sync": true, "autoReload": true, "fontFamily": "", "hideAvatars": false },
+  "theme":         { "sync": true, "live": true, "fontFamily": "", "hideAvatars": false },
   "manageTeamsConfig": true
 }
 ```
@@ -161,10 +161,15 @@ your Omarchy palette, so surfaces, text, strokes, and brand accents retint.
 Anything Teams hardcodes outside the token system stays as Microsoft shipped it —
 this is a good retint, not a full reskin.
 
-CSS is read when a page loads, so applying it means restarting Teams. With
-`theme.autoReload` on (the default), a theme switch restarts Teams by itself —
-unless you are in a call, in which case it waits and retints on hang-up. The
-popup's palette button forces it immediately.
+A theme switch retints the **running** Teams in about 40ms — no reload, no
+restart. Teams is launched with a DevTools port on a random loopback port, and
+the plugin pushes the stylesheet into the open pages over the DevTools
+protocol. (Restarting instead costs a minute: Electron crashes with SIGILL on
+SIGTERM and sits as a frozen window while the kernel writes the core dump.)
+
+The port is loopback-only, but any process running as your user could use it
+to drive Teams. If that trade is not for you, set `theme.live` to `false` —
+themes then apply on the next Teams start.
 
 ## Requirements
 

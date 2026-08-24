@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""omarchy-teams-cssinject — apply a stylesheet to the running Teams, live.
+
+Restarting Teams to re-read customCSSLocation costs the user a minute: Electron
+crashes with SIGILL on SIGTERM and sits as a frozen window while the kernel
+writes the core dump. Reload shortcuts never reach the app from the compositor.
+So the plugin launches teams-for-linux with `--remote-debugging-port=0` (a
+random loopback port, recorded in the profile's DevToolsActivePort file) and
+this tool pushes the CSS into every open page over the DevTools protocol —
+the theme lands in tens of milliseconds with the app running undisturbed.
+
+Usage:
+  omarchy-teams-cssinject <css-file> [--profile <dir>]
+
+Exit codes: 0 applied, 2 Teams not reachable (no port / not running), 1 error.
+Stdlib only: the WebSocket client below is the minimal RFC 6455 subset CDP
+needs (text frames, client masking, no extensions) over loopback.
+"""
+
+import base64
+import hashlib
+import json
+import os
+import socket
+import struct
+import sys
+import urllib.request
+
+STYLE_ID = "omarchy-theme-live"
+
+
+def fail(code, msg):
+    print(f"omarchy-teams-cssinject: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# --- minimal websocket client ---------------------------------------------
+
+
+class WsClient:
+    def __init__(self, host, port, path, timeout=5.0):
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        key = base64.b64encode(os.urandom(16)).decode()
+        handshake = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        self.sock.sendall(handshake.encode())
+
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("websocket handshake failed: connection closed")
+            response += chunk
+        header, _, self.buffer = response.partition(b"\r\n\r\n")
+        if b" 101 " not in header.split(b"\r\n", 1)[0]:
+            raise ConnectionError("websocket handshake refused")
+        accept = base64.b64encode(
+            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()
+        ).decode()
+        if accept.encode() not in header:
+            raise ConnectionError("websocket handshake accept mismatch")
+
+    def send_text(self, payload: str):
+        data = payload.encode()
+        mask = os.urandom(4)
+        length = len(data)
+        head = bytearray([0x81])  # FIN + text
+        if length < 126:
+            head.append(0x80 | length)
+        elif length < 1 << 16:
+            head.append(0x80 | 126)
+            head += struct.pack(">H", length)
+        else:
+            head.append(0x80 | 127)
+            head += struct.pack(">Q", length)
+        head += mask
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+        self.sock.sendall(bytes(head) + masked)
+
+    def _read_exact(self, n):
+        while len(self.buffer) < n:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("websocket closed mid-frame")
+            self.buffer += chunk
+        out, self.buffer = self.buffer[:n], self.buffer[n:]
+        return out
+
+    def recv_text(self):
+        # Skip non-text frames (pings get pong'd) until a full text message.
+        message = b""
+        while True:
+            b1, b2 = self._read_exact(2)
+            opcode = b1 & 0x0F
+            length = b2 & 0x7F
+            if length == 126:
+                (length,) = struct.unpack(">H", self._read_exact(2))
+            elif length == 127:
+                (length,) = struct.unpack(">Q", self._read_exact(8))
+            payload = self._read_exact(length)  # server frames are unmasked
+            if opcode == 0x9:  # ping -> pong
+                self.send_pong(payload)
+                continue
+            if opcode in (0x1, 0x0):
+                message += payload
+                if b1 & 0x80:  # FIN
+                    return message.decode("utf-8", "replace")
+                continue
+            if opcode == 0x8:
+                raise ConnectionError("websocket closed")
+            # binary or other: ignore
+            if b1 & 0x80:
+                message = b""
+
+    def send_pong(self, payload):
+        mask = os.urandom(4)
+        head = bytearray([0x8A, 0x80 | len(payload)]) + mask
+        self.sock.sendall(bytes(head) + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+# --- CDP ---------------------------------------------------------------------
+
+
+def rpc(ws: WsClient, msg_id: int, method: str, params: dict):
+    ws.send_text(json.dumps({"id": msg_id, "method": method, "params": params}))
+    while True:
+        reply = json.loads(ws.recv_text())
+        if reply.get("id") == msg_id:
+            return reply
+
+
+def inject(page, css: str) -> bool:
+    """Upsert the live style tag in one page. Returns True when applied."""
+    url = page.get("webSocketDebuggerUrl", "")
+    if not url.startswith("ws://"):
+        return False
+    hostport, _, path = url[5:].partition("/")
+    host, _, port = hostport.partition(":")
+
+    # The style element carries our id; running this twice replaces, not stacks.
+    expression = (
+        "(() => {"
+        f"  const id = {json.dumps(STYLE_ID)};"
+        "  let s = document.getElementById(id);"
+        "  if (!s) { s = document.createElement('style'); s.id = id;"
+        "            (document.head || document.documentElement).appendChild(s); }"
+        f"  s.textContent = {json.dumps(css)};"
+        "  return 'applied';"
+        "})()"
+    )
+
+    ws = WsClient(host, int(port), "/" + path)
+    try:
+        reply = rpc(ws, 1, "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True})
+        value = (((reply.get("result") or {}).get("result")) or {}).get("value")
+        return value == "applied"
+    finally:
+        ws.close()
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        sys.exit(0)
+    css_path = args[0]
+    profile = os.path.expanduser("~/.config/teams-for-linux")
+    if "--profile" in args:
+        profile = args[args.index("--profile") + 1]
+
+    try:
+        with open(css_path, encoding="utf-8") as fh:
+            css = fh.read()
+    except OSError as exc:
+        fail(1, f"cannot read {css_path}: {exc}")
+
+    port_file = os.path.join(profile, "DevToolsActivePort")
+    try:
+        with open(port_file, encoding="utf-8") as fh:
+            port = int(fh.readline().strip())
+    except (OSError, ValueError):
+        fail(2, "no DevToolsActivePort — Teams is not running with a debug port")
+
+    try:
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/json/list", timeout=3) as resp:
+            targets = json.load(resp)
+    except OSError:
+        # The file can outlive the process that wrote it.
+        fail(2, f"port {port} from DevToolsActivePort is not answering")
+
+    applied = 0
+    for target in targets:
+        if target.get("type") != "page":
+            continue
+        # The incoming-call toast and similar file:// popups are ours to skip:
+        # they are tiny transient windows and the CSS is for the Teams app.
+        if not target.get("url", "").startswith("https://"):
+            continue
+        try:
+            if inject(target, css):
+                applied += 1
+        except (ConnectionError, OSError, TimeoutError) as exc:
+            print(f"omarchy-teams-cssinject: page failed: {exc}", file=sys.stderr)
+
+    if applied == 0:
+        fail(2, "no page accepted the stylesheet")
+    print(f"applied to {applied} page(s)")
+
+
+if __name__ == "__main__":
+    main()

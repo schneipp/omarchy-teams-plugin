@@ -30,6 +30,7 @@ Item {
   // free to change.
   readonly property string bridgePath: String(Qt.resolvedUrl("bin/omarchy-teams-bridge")).replace(/^file:\/\//, "")
   readonly property string cliPath: String(Qt.resolvedUrl("bin/omarchy-teams")).replace(/^file:\/\//, "")
+  readonly property string cssInjectPath: String(Qt.resolvedUrl("bin/omarchy-teams-cssinject")).replace(/^file:\/\//, "")
 
   // ------------------------------------------------------------------ config
 
@@ -390,10 +391,6 @@ Item {
       if (cfg("notifications", "callEnded", false)) {
         notify("Call ended", "", "󰋕", "low")
       }
-      if (pendingThemeReload) {
-        pendingThemeReload = false
-        if (cfg("theme", "autoReload", true)) reloadTeams()
-      }
     }
   }
 
@@ -501,9 +498,6 @@ Item {
 
   onThemeCssChanged: if (cfg("theme", "sync", true)) themeWriteDebounce.restart()
 
-  // A theme switch mid-call must not kill the meeting; remember and apply on
-  // hang-up instead.
-  property bool pendingThemeReload: false
 
   Timer {
     id: themeWriteDebounce
@@ -541,20 +535,56 @@ Item {
     return true
   }
 
-  // Teams reads the CSS once per page load, so writing the file is only half
-  // the job — an already-running Teams keeps the old palette until restarted.
+  // Applying the theme does NOT restart Teams. Killing it costs the user a
+  // minute: Electron crashes with SIGILL on SIGTERM and sits as a frozen
+  // "Application Not Responding" window while the kernel writes the core
+  // dump — and compositor-sent reload shortcuts never reach the app. Instead
+  // the plugin launches Teams with a loopback DevTools port and pushes the
+  // stylesheet into the running pages directly; measured at ~40ms.
   function applyTheme() {
     var seen = cssSeen
     var changed = writeThemeCss()
     if (!changed || !seen) return
-    if (!teamsConnected) return          // next start picks it up anyway
-    if (inCall) {
-      // Restarting Teams would hang up the call. Do it after.
-      pendingThemeReload = true
-      notify("Theme staged", "Teams retints when the call ends.", "\u{f02bb}", "low")
+    if (!teamsConnected) return          // next start reads the file anyway
+    injectThemeCss(false)
+  }
+
+  // The explicit popup/IPC path: always push, and say so when it cannot.
+  function applyThemeNow() {
+    writeThemeCss()
+    if (!teamsConnected) {
+      notify("Theme written", "Teams is not running; it applies on next start.", "\u{f02bb}", "low")
       return
     }
-    if (cfg("theme", "autoReload", true)) reloadTeams()
+    injectThemeCss(true)
+  }
+
+  Process {
+    id: injectProc
+    property bool notifyOnFail: false
+    stdout: SplitParser { onRead: function (line) { /* "applied to N page(s)" */ } }
+    stderr: SplitParser {
+      onRead: function (line) {
+        if (String(line).trim()) console.warn("rams.teams cssinject: " + line)
+      }
+    }
+    onExited: function (exitCode) {
+      if (exitCode === 0) return
+      // 2 = Teams runs without the debug port (started outside our launcher).
+      // Auto-killing it here would bring the crash-hang back, so just say it.
+      if (injectProc.notifyOnFail || exitCode === 2) {
+        service.notify("Theme staged",
+          "This Teams was started without live apply — restart it from the Teams panel to retint.",
+          "\u{f02bb}", "low")
+      }
+    }
+  }
+
+  function injectThemeCss(notifyOnFail) {
+    if (injectProc.running) return
+    injectProc.notifyOnFail = !!notifyOnFail
+    injectProc.command = ["python3", cssInjectPath, cssPath]
+    injectProc.running = true
   }
 
   function ensureDir(dir) {
@@ -699,7 +729,11 @@ Item {
     }
 
     function reloadTheme(): string {
-      service.writeThemeCss()
+      service.applyThemeNow()
+      return "ok"
+    }
+
+    function restartTeams(): string {
       service.reloadTeams()
       return "ok"
     }

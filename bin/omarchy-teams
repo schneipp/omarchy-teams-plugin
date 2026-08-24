@@ -75,14 +75,50 @@ cmd_link() {
   fi
 }
 
+theme_live_enabled() {
+  # Default on; set {"theme":{"live":false}} in teams.json to opt out.
+  python3 - "$PLUGIN_CONFIG" <<'PY'
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+sys.exit(0 if (cfg.get("theme") or {}).get("live", True) else 1)
+PY
+}
+
 cmd_launch() {
   # The AUR package installs to /opt with nothing on PATH, and the launch flags
   # (Wayland vs X11) live in the desktop entry this CLI manages. This is the
   # one place that knows both, which is why the shell plugin launches Teams
   # through here instead of guessing.
-  local flags
+  #
+  # --remote-debugging-port=0 opens a DevTools port on a RANDOM loopback port
+  # (recorded in the profile's DevToolsActivePort file). It is what lets the
+  # plugin retint the running app in ~40ms instead of restarting it — an
+  # Electron restart here means a SIGILL shutdown crash and a minute-long
+  # frozen window. Loopback-only, but any process running as your user could
+  # use it to drive Teams; disable with {"theme":{"live":false}}.
+  local flags extra=""
   flags=$(current_flags)
-  exec setsid uwsm-app -- "$(teams_exec)" $flags "$@"
+  if theme_live_enabled; then
+    extra="--remote-debugging-port=0"
+  fi
+  exec setsid uwsm-app -- "$(teams_exec)" $flags $extra "$@"
+}
+
+cmd_restart() {
+  # A real restart. Expect the old instance to linger: Electron crashes with
+  # SIGILL on SIGTERM and the kernel writes a core dump before the process
+  # disappears — that is upstream behaviour, not ours. Wait it out fully so
+  # the relaunch cannot lose to the single-instance lock.
+  pkill -x teams-for-linux 2>/dev/null
+  for _ in $(seq 1 90); do
+    pgrep -x teams-for-linux >/dev/null || break
+    sleep 1
+  done
+  cmd_launch "$@" &
+  echo "restarted"
 }
 
 # ---------------------------------------------------------------- desktop entry
@@ -223,6 +259,23 @@ cmd_doctor() {
     warn "$TFL_CONFIG does not exist yet (start Teams once, or let the plugin write it)"
   fi
 
+  echo "live theme apply:"
+  local dtp="$HOME/.config/teams-for-linux/DevToolsActivePort"
+  if pgrep -x teams-for-linux >/dev/null 2>&1; then
+    if [[ -f $dtp ]] && "$SELF_DIR/omarchy-teams-cssinject" --help >/dev/null 2>&1; then
+      local port; port=$(head -1 "$dtp" 2>/dev/null)
+      if curl -sf --max-time 2 "http://127.0.0.1:${port}/json/version" >/dev/null 2>&1; then
+        ok "debug port $port answering — themes apply live (~40ms)"
+      else
+        warn "Teams runs without a live-apply port — themes need a restart (start it via omarchy-teams launch)"
+      fi
+    else
+      warn "no DevToolsActivePort — start Teams via omarchy-teams launch for live theme apply"
+    fi
+  else
+    warn "Teams not running"
+  fi
+
   echo "wayland / screen sharing:"
   # pgrep -x matches the kernel comm name, which is truncated to 15 characters
   # ("xdg-desktop-por"), so an -x check for the full name never matches. Match
@@ -285,6 +338,7 @@ omarchy-teams — Microsoft Teams, wired into Omarchy
   theme --reload      ...and restart Teams so it takes effect now
   link <url>          Open an msteams:// or teams.microsoft.com/l/ link
   launch              Start Teams with the configured launch flags
+  restart             Fully restart Teams (slow; rarely needed)
   install [on|off]    Install desktop entries and claim msteams:// links
   wayland <on|off>    Native Wayland (better screen share) or XWayland
   config              Edit the plugin config
@@ -304,6 +358,7 @@ case "${1:-}" in
   unstick)  shift; ipc endMeetingMode ;;
   link)     shift; cmd_link "${1:-}" ;;
   launch)   shift; cmd_launch "$@" ;;
+  restart)  shift; cmd_restart "$@" ;;
   install)  shift; cmd_install "${1:-keep}" ;;
   wayland)  shift; cmd_wayland "${1:-status}" ;;
   config)   shift; cmd_config ;;

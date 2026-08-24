@@ -378,11 +378,11 @@ Panel {
             }
             PanelActionButton {
               iconText: "󰸉"
-              tooltipText: "Rewrite the theme CSS and restart Teams"
+              tooltipText: "Apply the Omarchy theme to Teams now"
               foreground: root.foreground
               fontFamily: root.fontFamily
               bordered: true
-              onClicked: if (root.service) { root.service.writeThemeCss(); root.service.reloadTeams() }
+              onClicked: if (root.service) root.service.applyThemeNow()
             }
             PanelActionButton {
               iconText: "󰑓"
