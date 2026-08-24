@@ -181,8 +181,18 @@ themes then apply on the next Teams start.
 
 ## Calendar
 
-The "Next up" list uses `teams-for-linux`'s Graph API integration. If you have not
-enabled it, the list stays empty and everything else works fine.
+The "Next up" list uses `teams-for-linux`'s Graph API integration, which reuses
+your signed-in Teams session for tokens — no Azure app registration, no extra
+consent. Enable it in `~/.config/teams-for-linux/config.json` and restart Teams
+once:
+
+```json
+{ "graphApi": { "enabled": true } }
+```
+
+Then `omarchy-teams calendar 7` prints your next week, and the popup's
+"Next up" section fills in. Without it, the list stays empty and everything
+else works fine.
 
 ## Troubleshooting
 

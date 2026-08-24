@@ -728,6 +728,10 @@ Item {
       return "requested"
     }
 
+    function calendarList(): string {
+      return JSON.stringify(service.calendar || [])
+    }
+
     function reloadTheme(): string {
       service.applyThemeNow()
       return "ok"

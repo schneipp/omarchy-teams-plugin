@@ -352,7 +352,17 @@ case "${1:-}" in
   video)    shift; ipc toggleVideo ;;
   hand)     shift; ipc raiseHand ;;
   focus)    shift; ipc focus ;;
-  calendar) shift; ipc calendar "${1:-1}" ;;
+  calendar)
+    shift
+    ipc calendar "${1:-1}" >/dev/null
+    # The reply travels Teams -> Graph -> MQTT -> service; give it a moment.
+    for _ in $(seq 1 10); do
+      sleep 1
+      out=$(ipc calendarList 2>/dev/null)
+      [[ -n $out && $out != "[]" ]] && break
+    done
+    if command -v jq >/dev/null 2>&1; then echo "$out" | jq .; else echo "$out"; fi
+    ;;
   theme)    shift; [[ ${1:-} == --reload ]] && ipc reloadTheme || ipc writeTheme ;;
   bridge)   shift; ipc restartBridge ;;
   unstick)  shift; ipc endMeetingMode ;;

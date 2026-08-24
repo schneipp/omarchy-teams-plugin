@@ -365,12 +365,29 @@ function isAllowedAction(action) {
 
 // ---------------------------------------------------------------- calendar
 
+// Graph hands out {dateTime: "2026-08-26T14:00:00.0000000", timeZone: "UTC"}
+// — an ISO string with NO offset suffix. Date.parse reads offset-less strings
+// as local time, which silently shifts every meeting by the UTC offset, so
+// the zone has to be folded back into the string here.
+function isoFrom(when) {
+  if (!when) return ""
+  if (typeof when === "string") return when
+  var dt = String(when.dateTime || "")
+  if (!dt) return ""
+  var hasOffset = /(Z|[+-]\d\d:?\d\d)$/.test(dt)
+  if (!hasOffset && String(when.timeZone || "").toUpperCase() === "UTC") return dt + "Z"
+  return dt
+}
+
 // Shape the get-calendar reply into the few fields the popup renders.
+// teams-for-linux wraps Graph's answer as {success, data: {value: [...]}}.
 function parseCalendar(payload) {
   var raw = String(payload || "").trim()
   if (!raw) return []
   var data
   try { data = JSON.parse(raw) } catch (e) { return [] }
+  if (data && data.success === false) return []
+  if (data && isPlainObject(data.data)) data = data.data
   var items = []
   var list = Array.isArray(data) ? data
     : (data && Array.isArray(data.events) ? data.events
@@ -378,12 +395,11 @@ function parseCalendar(payload) {
   for (var i = 0; i < list.length; i++) {
     var ev = list[i]
     if (!ev) continue
-    var start = ev.start && ev.start.dateTime ? ev.start.dateTime : ev.start
-    var end = ev.end && ev.end.dateTime ? ev.end.dateTime : ev.end
+    if (ev.isCancelled) continue
     items.push({
       subject: String(ev.subject || ev.title || "(no subject)"),
-      start: String(start || ""),
-      end: String(end || ""),
+      start: isoFrom(ev.start),
+      end: isoFrom(ev.end),
       joinUrl: String(ev.joinUrl || (ev.onlineMeeting && ev.onlineMeeting.joinUrl) || ""),
       organizer: String(
         (ev.organizer && ev.organizer.emailAddress && ev.organizer.emailAddress.name) || ""
