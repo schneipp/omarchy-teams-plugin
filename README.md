@@ -250,6 +250,21 @@ omarchy-teams bridge          # restart just the bridge
 journalctl --user -f | grep rams.teams
 ```
 
+## Uninstall
+
+```bash
+omarchy bar remove rams.teams
+omarchy plugin remove rams.teams --yes
+rm -f ~/.local/share/applications/omarchy-teams{,-app}.desktop   # desktop entries + msteams:// handler
+rm -f ~/.config/omarchy/teams.json                               # plugin config, if you made one
+rm -f ~/.config/teams-for-linux/omarchy-theme.css                # generated theme CSS
+```
+
+The keys the plugin merged into `~/.config/teams-for-linux/config.json`
+(`mqtt`, `customCSSLocation`) are yours to keep or delete; everything else in
+that file was never touched. `teams-for-linux` itself stays installed —
+`omarchy pkg drop teams-for-linux-bin` if you want it gone too.
+
 ## Tests
 
 ```bash
