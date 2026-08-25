@@ -95,6 +95,8 @@ function subtopic(topic, prefix) {
 
 function barState(s) {
   if (!s.bridgeReady) return { glyph: TEAMS_GLYPH, label: "Teams bridge starting", tone: "off", show: false }
+  if (s.teamsInstalled === false)
+    return { glyph: TEAMS_GLYPH, label: "Teams for Linux is not installed — click to install", tone: "off", show: !!s.showWhenClosed }
   if (!s.teamsConnected) return { glyph: TEAMS_GLYPH, label: "Teams not running", tone: "off", show: !!s.showWhenClosed }
 
   if (s.incomingCall)
@@ -121,6 +123,7 @@ function barState(s) {
 // A compact secondary line for the popup header.
 function statusSummary(s) {
   if (!s.bridgeReady) return "Bridge starting…"
+  if (s.teamsInstalled === false) return "Teams for Linux is not installed"
   if (!s.teamsConnected) return "Teams for Linux is not running"
   var bits = []
   if (s.inCall) bits.push("In a call")
@@ -379,6 +382,15 @@ function isoFrom(when) {
   return dt
 }
 
+// Meeting links are clicked, and the click ends in xdg-open. The payload
+// travels over MQTT, so treat it as untrusted input: only the two schemes a
+// Teams meeting can legitimately use survive; file://, javascript: and
+// anything else is dropped rather than handed to the URL dispatcher.
+function safeJoinUrl(url) {
+  var u = String(url || "").trim()
+  return /^(https:\/\/|msteams:)/i.test(u) ? u : ""
+}
+
 // Shape the get-calendar reply into the few fields the popup renders.
 // teams-for-linux wraps Graph's answer as {success, data: {value: [...]}}.
 function parseCalendar(payload) {
@@ -400,7 +412,7 @@ function parseCalendar(payload) {
       subject: String(ev.subject || ev.title || "(no subject)"),
       start: isoFrom(ev.start),
       end: isoFrom(ev.end),
-      joinUrl: String(ev.joinUrl || (ev.onlineMeeting && ev.onlineMeeting.joinUrl) || ""),
+      joinUrl: safeJoinUrl(ev.joinUrl || (ev.onlineMeeting && ev.onlineMeeting.joinUrl) || ""),
       organizer: String(
         (ev.organizer && ev.organizer.emailAddress && ev.organizer.emailAddress.name) || ""
       )

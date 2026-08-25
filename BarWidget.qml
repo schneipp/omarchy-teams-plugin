@@ -40,6 +40,12 @@ Panel {
   readonly property bool sharing: service ? service.screenSharing : false
   readonly property bool ringing: service ? service.incomingCall : false
   readonly property bool teamsUp: service ? service.teamsConnected : false
+  readonly property bool installed: service ? service.teamsInstalled : true
+  readonly property bool installing: service ? service.installLaunched : false
+
+  // A stale "not installed" verdict would show an install button to someone
+  // who has Teams, so re-check every time the popup comes up.
+  onOpenedChanged: if (opened && service) service.recheckInstalled()
 
   function toneColor(tone) {
     switch (tone) {
@@ -152,8 +158,9 @@ Panel {
 
           PanelHero {
             width: parent.width
-            title: root.teamsUp ? Model.presenceInfo(root.service ? root.service.presence : "unknown").label
-                                : "Teams for Linux"
+            title: root.teamsUp && root.installed
+              ? Model.presenceInfo(root.service ? root.service.presence : "unknown").label
+              : "Teams for Linux"
             meta: root.service ? root.service.summary : "Service not loaded"
             detail: root.service && root.service.lastError ? root.service.lastError : ""
             foreground: root.foreground
@@ -165,6 +172,70 @@ Panel {
                 color: root.toneColor(root.state.tone)
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.display
+              }
+            }
+          }
+
+          // ---- install ----------------------------------------------------
+          //
+          // The plugin can see Teams is missing, so say it once and offer the
+          // fix: Omarchy's own install flow in a floating terminal, where the
+          // user watches the command run and types their own password.
+
+          Rectangle {
+            width: parent.width
+            implicitHeight: installCol.implicitHeight + Style.space(16)
+            radius: Style.cornerRadius
+            visible: !root.installed
+            color: installMouse.containsMouse && !root.installing
+              ? Style.hoverFillFor(root.foreground, root.accent, root.urgent)
+              : Style.normalFillFor(root.foreground, root.accent, root.urgent)
+            border.width: 1
+            border.color: root.accent
+
+            MouseArea {
+              id: installMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              enabled: !root.installing
+              cursorShape: root.installing ? Qt.ArrowCursor : Qt.PointingHandCursor
+              onClicked: if (root.service) root.service.installTeams()
+            }
+
+            Column {
+              id: installCol
+              anchors.centerIn: parent
+              width: parent.width - Style.space(20)
+              spacing: Style.space(2)
+
+              Row {
+                spacing: Style.space(8)
+                Text {
+                  text: root.installing ? "󰇚" : "󰏔"
+                  color: root.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+                Text {
+                  text: root.installing ? "Installing Teams for Linux…"
+                                        : "Install Teams for Linux"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+              }
+              Text {
+                text: root.installing
+                  ? "Running in the floating terminal — this panel updates when it lands."
+                  : "AUR package teams-for-linux-bin, in an Omarchy terminal."
+                color: Qt.darker(root.foreground, 1.4)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                width: parent.width
+                wrapMode: Text.WordWrap
               }
             }
           }
@@ -370,7 +441,8 @@ Panel {
 
             PanelActionButton {
               iconText: "󰊻"
-              tooltipText: root.teamsUp ? "Focus Teams  (f)" : "Start Teams  (f)"
+              tooltipText: !root.installed ? "Install Teams for Linux  (f)"
+                : root.teamsUp ? "Focus Teams  (f)" : "Start Teams  (f)"
               foreground: root.foreground
               fontFamily: root.fontFamily
               bordered: true

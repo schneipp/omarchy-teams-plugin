@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "id": "rams.teams",
   "name": "Teams",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "rams",
   "license": "MIT",
   "homepage": "https://github.com/schneipp/omarchy-teams-plugin",
-  "description": "Microsoft Teams in the Omarchy bar: presence, live mic and screen-share state, meeting mode that silences the desktop and holds off the lock screen, incoming-call toasts, a global mute keybind, and Teams retinted to the current theme.",
+  "description": "Microsoft Teams as a first-class citizen of the Omarchy bar: live presence, mic and screen-share state, meeting mode that silences the desktop and holds off the lock screen, click-to-answer call toasts, a global mute that works from fullscreen, Teams retinted to your theme in ~40ms — and a one-click install of teams-for-linux if it is missing.",
   "keepLoaded": true,
   "kinds": [
     "service",

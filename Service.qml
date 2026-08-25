@@ -111,6 +111,7 @@ Item {
   // Snapshot the widget binds to, so one property change repaints once.
   readonly property var barState: Model.barState({
     bridgeReady: bridgeReady,
+    teamsInstalled: teamsInstalled,
     teamsConnected: teamsConnected,
     presence: presence,
     inCall: inCall,
@@ -124,6 +125,7 @@ Item {
 
   readonly property string summary: Model.statusSummary({
     bridgeReady: bridgeReady,
+    teamsInstalled: teamsInstalled,
     teamsConnected: teamsConnected,
     presence: presence,
     inCall: inCall,
@@ -448,6 +450,59 @@ Item {
     }
   }
 
+  // --------------------------------------------------------------- install
+  //
+  // The whole plugin is inert without teams-for-linux, so instead of a dead
+  // icon the popup offers to install it — through Omarchy's own install flow
+  // (a floating terminal running omarchy-pkg-aur-add), the same path
+  // `omarchy install app` takes, so the user sees exactly what runs and
+  // enters their own sudo password.
+
+  // Optimistic until the first check lands, so the "install" UI never
+  // flashes at people who have Teams.
+  property bool teamsInstalled: true
+  property bool installLaunched: false
+
+  Process {
+    id: installCheck
+    command: ["bash", "-c",
+      "command -v teams-for-linux >/dev/null 2>&1 || test -x /opt/teams-for-linux/teams-for-linux"]
+    onExited: function (exitCode) {
+      var present = exitCode === 0
+      if (present && !service.teamsInstalled) {
+        service.installLaunched = false
+        service.notify("Teams for Linux installed", "Starting it now.", "󰊻", "normal")
+        // First run: claim msteams:// links and write the desktop entries,
+        // then bring the app up against the already-running bridge.
+        service.run(["bash", "-lc",
+                     JSON.stringify(service.cliPath) + " install >/dev/null 2>&1; "
+                     + service.launchCommand()])
+      }
+      service.teamsInstalled = present
+    }
+  }
+
+  function recheckInstalled() {
+    if (!installCheck.running) installCheck.running = true
+  }
+
+  // While Teams is missing (or an install is underway) poll cheaply; the
+  // timer stops itself the moment the binary shows up.
+  Timer {
+    interval: 5000
+    repeat: true
+    running: !service.teamsInstalled
+    onTriggered: service.recheckInstalled()
+  }
+
+  function installTeams() {
+    if (teamsInstalled || installLaunched) return
+    installLaunched = true
+    run(["omarchy-launch-floating-terminal-with-presentation",
+         "echo 'Installing Teams for Linux (AUR: teams-for-linux-bin)...'; "
+         + "omarchy-pkg-aur-add teams-for-linux-bin"])
+  }
+
   // ----------------------------------------------------------- launch/focus
 
   function launchCommand() {
@@ -461,6 +516,10 @@ Item {
   }
 
   function focusTeams() {
+    if (!teamsInstalled) {
+      installTeams()
+      return
+    }
     run(["bash", "-lc", focusCommand()])
   }
 
@@ -672,6 +731,7 @@ Item {
   Component.onCompleted: {
     ensureDir(tflConfigDir)
     ensureDir(home + "/.local/state/omarchy")
+    recheckInstalled()
     recoveryFile.reload()
     // configFile.onLoaded/onLoadFailed drives applyConfig, which starts the
     // bridge and reconciles the Teams config, so there is nothing to do here
@@ -756,6 +816,11 @@ Item {
     function endMeetingMode(): string {
       service.exitMeetingMode()
       return "ok"
+    }
+
+    function install(): string {
+      service.installTeams()
+      return service.teamsInstalled ? "already installed" : "install started"
     }
   }
 }

@@ -59,6 +59,11 @@ cmd_link() {
   local target
   target=$(normalize_link "$url")
 
+  # This is a registered x-scheme-handler, so anything on the system can feed
+  # it a URL. Only actual Teams links go any further; in particular nothing
+  # starting with "-" may ever reach the Electron argv.
+  [[ $target == msteams://* ]] || die "not a Teams link: $url"
+
   # If a window is already up, hand the URL to the running instance and raise
   # it, rather than letting a second process fight over the single-instance
   # lock and leave the meeting opening behind another window.

@@ -11,6 +11,14 @@ Almost all of the logic lives inside the Omarchy shell as a Quickshell plugin.
 
 ![Omarchy 4](https://img.shields.io/badge/Omarchy-4.x-8b8ff5) ![License](https://img.shields.io/badge/license-MIT-green)
 
+![Teams for Omarchy](preview.png)
+
+The popup, themed by whatever Omarchy theme you run:
+
+| The panel | Teams missing? One click fixes it |
+|---|---|
+| ![Popup](screenshots/popup.png) | ![Install card](screenshots/install-card.png) |
+
 ---
 
 ## Why this exists
@@ -34,16 +42,21 @@ This plugin listens to that, and reacts.
 | **Global mute** | `SUPER + ALT + M` from any window, including a fullscreen one |
 | **Meeting-starting nudge** | A toast when a scheduled meeting begins, before anyone calls you |
 | **Theme sync** | Teams is retinted from your Omarchy palette and follows every theme switch |
+| **One-click install** | Teams for Linux not installed? The popup offers to install it through Omarchy's own flow — a floating terminal running `omarchy-pkg-aur-add`, your password typed by you, then Teams starts wired up |
 | **Deep links** | `msteams://` and `teams.microsoft.com/l/…` links open in the app, reusing the window |
 | **Next up** | Your upcoming meetings in the popup, click to join (needs Graph API enabled) |
 
 ## Install
 
 ```bash
-yay -S teams-for-linux-bin
 omarchy plugin add https://github.com/schneipp/omarchy-teams-plugin.git --enable --yes
 omarchy bar add rams.teams
 ```
+
+No `teams-for-linux` yet? Click the bar icon — the popup offers to install it
+(AUR `teams-for-linux-bin`, in an Omarchy floating terminal where you watch the
+command and type your own sudo password), then starts it wired up. Prefer to do
+it yourself: `yay -S teams-for-linux-bin`.
 
 Then wire up Teams itself:
 
@@ -167,9 +180,43 @@ the plugin pushes the stylesheet into the open pages over the DevTools
 protocol. (Restarting instead costs a minute: Electron crashes with SIGILL on
 SIGTERM and sits as a frozen window while the kernel writes the core dump.)
 
-The port is loopback-only, but any process running as your user could use it
-to drive Teams. If that trade is not for you, set `theme.live` to `false` —
-themes then apply on the next Teams start.
+The port is loopback-only, but loopback is reachable by any local process —
+see [Security](#security). If that trade is not for you, set `theme.live` to
+`false` — themes then apply on the next Teams start.
+
+## Security
+
+Written down because you should not have to read the source to know the trade-offs.
+
+- **The broker checks who is calling.** Loopback TCP is reachable by every
+  account on the machine, and an open broker would let any of them spoof call
+  state (which drives meeting mode, which holds off your lock screen) or drive
+  Teams over the command topic. The bridge resolves each connecting socket's
+  owner through `/proc/net/tcp` and refuses every socket it cannot positively
+  attribute to your own UID.
+- **Malformed clients cannot balloon it.** MQTT packets are capped at 4 MB;
+  anything bigger is treated as hostile and the session dropped.
+- **Meeting links are treated as untrusted input.** They arrive over MQTT, so
+  only `https://` and `msteams:` URLs ever reach `xdg-open`; `file://`,
+  `javascript:` or anything else from a compromised publisher is dropped.
+  The `msteams://` scheme handler likewise refuses anything that is not a
+  Teams link, so nothing argument-shaped reaches the Electron command line.
+- **State lives in user-private paths.** Retained broker state sits under
+  `XDG_RUNTIME_DIR` (falling back to `~/.local/state`), never world-writable
+  `/tmp`.
+- **Your configs are merged, never clobbered.** The plugin only adds the keys
+  it needs to `teams-for-linux/config.json`, leaves everything else alone, and
+  refuses to touch the file at all if it cannot parse it. Set
+  `manageTeamsConfig: false` and it will not write there, period.
+- **The one deliberate trade: live theming.** Teams is launched with a
+  DevTools port on a random loopback port so themes apply in ~40 ms without a
+  restart. That port has no authentication, and loopback is reachable by any
+  local process — one could use it to drive your Teams session. Single-user
+  desktop: fine. Shared machine: set `theme.live: false` and the port is never
+  opened; themes then apply on the next Teams start.
+
+Nothing in the plugin runs as root, phones home, or touches the network beyond
+127.0.0.1.
 
 ## Requirements
 
